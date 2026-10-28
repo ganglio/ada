@@ -1,0 +1,3 @@
+# All inference runs locally on the Pi
+
+Ada listens to a private home all day, so transcripts, voiceprints and memories never leave the device and no cloud LLM is called. We accept the quality ceiling of the ~1–1.5B-parameter models the AI HAT+ 2 can run, and compensate with structured memory and a narrow task per model call. The engine sits behind an interface so a larger model can be swapped in later. The Telegram channel needs internet for message transport only, not for inference. A development version (V0) runs the same decision on a development machine, using LM Studio with the same 1–1.5B models and 2048-token context the Pi will use, so that results transfer to the hardware and a more capable dev environment never hides the production ceiling.
