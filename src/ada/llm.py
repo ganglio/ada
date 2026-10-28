@@ -1,11 +1,13 @@
 """The inference engine behind a narrow interface (ADR 0001).
 
-V0 talks to LM Studio's OpenAI-compatible server. A Hailo backend can replace
-`OpenAICompatibleEngine` later without touching callers.
+V0 talks to an OpenAI-compatible server, LM Studio or Ollama. A Hailo backend
+can replace `OpenAICompatibleEngine` later without touching callers.
 """
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -36,6 +38,33 @@ class LLMEngine(Protocol):
 
 def estimate_tokens(text: str) -> int:
     return -(-len(text) // _CHARS_PER_TOKEN)
+
+
+@dataclass(frozen=True)
+class Backend:
+    base_url: str
+    default_model: str
+
+
+# Both servers speak the OpenAI protocol. The Ollama default is a Modelfile
+# build (see models/) because its OpenAI endpoint cannot set the context size.
+BACKENDS = {
+    "lmstudio": Backend("http://localhost:1234/v1", "qwen2.5-1.5b-instruct"),
+    "ollama": Backend("http://localhost:11434/v1", "ada-qwen2.5-1.5b"),
+}
+
+
+def engine_from_env(env: Mapping[str, str] | None = None) -> OpenAICompatibleEngine:
+    """Build the engine from ADA_LLM_BACKEND, ADA_LLM_MODEL and ADA_LLM_BASE_URL."""
+    env = os.environ if env is None else env
+    name = env.get("ADA_LLM_BACKEND", "lmstudio")
+    if name not in BACKENDS:
+        raise ValueError(f"unknown ADA_LLM_BACKEND {name!r}, expected one of {sorted(BACKENDS)}")
+    backend = BACKENDS[name]
+    return OpenAICompatibleEngine(
+        model=env.get("ADA_LLM_MODEL", backend.default_model),
+        base_url=env.get("ADA_LLM_BASE_URL", backend.base_url),
+    )
 
 
 class OpenAICompatibleEngine:

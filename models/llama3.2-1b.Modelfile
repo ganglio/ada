@@ -1,0 +1,4 @@
+# ollama create ada-llama3.2-1b -f models/llama3.2-1b.Modelfile
+FROM llama3.2:1b-instruct
+PARAMETER num_ctx 2048
+PARAMETER temperature 0
