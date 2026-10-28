@@ -32,10 +32,11 @@ def run(model: str | None) -> dict:
     if model:
         env["ADA_LLM_MODEL"] = model
     engine = engine_from_env(env)
+    backend = env.get("ADA_LLM_BACKEND", "lmstudio")
     out = {
-        "backend": env.get("ADA_LLM_BACKEND", "lmstudio"),
+        "backend": backend,
         "model": engine._model,
-        "base_url": str(engine._client.base_url),
+        "base_url": env.get("ADA_LLM_BASE_URL", BACKENDS[backend].base_url),
         "answers": [],
     }
     for tag, prompt in QUESTIONS:

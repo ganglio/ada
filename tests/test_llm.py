@@ -4,6 +4,7 @@ from ada.llm import (
     CONTEXT_TOKENS,
     ContextTooLarge,
     Message,
+    OllamaEngine,
     OpenAICompatibleEngine,
     engine_from_env,
     estimate_tokens,
@@ -30,27 +31,40 @@ def test_token_estimate_rounds_up():
 
 def test_defaults_to_lmstudio():
     engine = engine_from_env({})
+    assert isinstance(engine, OpenAICompatibleEngine)
     assert engine._client.base_url.port == 1234
 
 
-def test_selects_ollama_with_its_own_endpoint_and_model():
+def test_selects_ollama_native_engine_with_the_unrenamed_model():
     engine = engine_from_env({"ADA_LLM_BACKEND": "ollama"})
-    assert engine._client.base_url.port == 11434
-    assert engine._model == "ada-qwen2.5-1.5b"
+    assert isinstance(engine, OllamaEngine)
+    assert engine._base_url == "http://localhost:11434"
+    assert engine._model == "qwen2.5:1.5b-instruct"
 
 
 def test_model_and_url_can_be_overridden():
     engine = engine_from_env(
         {
             "ADA_LLM_BACKEND": "ollama",
-            "ADA_LLM_MODEL": "ada-llama3.2-1b",
-            "ADA_LLM_BASE_URL": "http://10.0.0.5:11434/v1",
+            "ADA_LLM_MODEL": "gemma3:4b",
+            "ADA_LLM_BASE_URL": "http://10.0.0.5:11434",
         }
     )
-    assert engine._model == "ada-llama3.2-1b"
-    assert str(engine._client.base_url).startswith("http://10.0.0.5:11434")
+    assert engine._model == "gemma3:4b"
+    assert engine._base_url == "http://10.0.0.5:11434"
 
 
 def test_rejects_an_unknown_backend():
     with pytest.raises(ValueError):
         engine_from_env({"ADA_LLM_BACKEND": "openai"})
+
+
+def test_ollama_engine_rejects_a_context_larger_than_the_pi_can_carry():
+    with pytest.raises(ValueError):
+        OllamaEngine("m", context_tokens=CONTEXT_TOKENS + 1)
+
+
+def test_ollama_engine_rejects_an_oversize_prompt_before_calling_the_model():
+    engine = OllamaEngine("m", base_url="http://127.0.0.1:1")
+    with pytest.raises(ContextTooLarge):
+        engine.complete([Message("user", "x" * (CONTEXT_TOKENS * 3))], max_tokens=64)

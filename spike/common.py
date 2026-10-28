@@ -39,6 +39,23 @@ def parse_json(text: str) -> Parsed:
     return Parsed(None, "failed")
 
 
+def recover_partial_memories(text: str) -> list[dict]:
+    """Salvage complete {"who":..., "fact":...} objects from a reply that was cut off.
+
+    Large-context runs can hit the reply budget mid-list. Counting the cut-off reply as a
+    total failure would measure the budget, not the model.
+    """
+    found = []
+    for match in re.finditer(r"\{[^{}]*\}", text):
+        try:
+            item = json.loads(match.group())
+        except ValueError:
+            continue
+        if isinstance(item, dict) and "fact" in item:
+            found.append(item)
+    return found
+
+
 def _post_json(url: str, payload: dict) -> dict:
     request = urllib.request.Request(
         url, json.dumps(payload).encode(), {"Content-Type": "application/json"}
@@ -77,5 +94,59 @@ def model_info(env: Mapping[str, str] | None = None) -> dict:
 _WORD = re.compile(r"[a-z0-9]+")
 
 
+def contains_keyword(text: str, keyword: str) -> bool:
+    """Keyword match at a word start. A leading space in the keyword is redundant but harmless.
+
+    Prefix matching is deliberate: "bollett" must still match "bolletta" and "bollette".
+    """
+    needle = normalise(keyword).strip()
+    return re.search(r"(?<![a-z0-9])" + re.escape(needle), normalise(text)) is not None
+
+
 def words(text: str) -> set[str]:
     return set(_WORD.findall(normalise(text)))
+
+
+OLLAMA = "http://localhost:11434"
+
+
+def _get_json(url: str) -> dict:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return json.load(response)
+
+
+def ollama_disk_bytes(model: str) -> int | None:
+    """On-disk size of a pulled model, as Ollama lists it."""
+    for entry in _get_json(f"{OLLAMA}/api/tags").get("models", []):
+        if entry["name"] == model or entry["name"] == f"{model}:latest":
+            return entry["size"]
+    return None
+
+
+def ollama_loaded(model: str) -> dict | None:
+    """Memory Ollama reports for a loaded model: total bytes, GPU bytes, loaded context."""
+    for entry in _get_json(f"{OLLAMA}/api/ps").get("models", []):
+        if entry["name"] == model or entry["name"] == f"{model}:latest":
+            return {
+                "memory_bytes": entry["size"],
+                "gpu_bytes": entry["size_vram"],
+                "loaded_context": entry.get("context_length"),
+            }
+    return None
+
+
+def ollama_max_context(model: str) -> int | None:
+    """The model's own maximum context, from its metadata."""
+    info = _post_json(f"{OLLAMA}/api/show", {"model": model}).get("model_info", {})
+    values = [v for k, v in info.items() if k.endswith(".context_length")]
+    return max(values) if values else None
+
+
+def ollama_details(model: str) -> dict:
+    d = _post_json(f"{OLLAMA}/api/show", {"model": model})
+    return {
+        "quantization": d["details"].get("quantization_level"),
+        "parameter_size": d["details"].get("parameter_size"),
+        "family": d["details"].get("family"),
+        "capabilities": d.get("capabilities", []),
+    }

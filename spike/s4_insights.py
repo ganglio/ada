@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 from ada.llm import ContextTooLarge, Message, engine_from_env
-from spike.common import model_info, normalise, parse_json
+from spike.common import contains_keyword, model_info, parse_json
 
 OWNER = "Giulia"
 
@@ -155,71 +155,88 @@ def code_checks(insight: dict, scenario: dict) -> tuple[bool, str]:
     return False, "not supported across conversations"
 
 
-def propose(engine, scenario: dict) -> tuple[list[dict], str]:
+def propose(engine, scenario: dict, reply_tokens: int = 900) -> tuple[list[dict], str]:
     try:
         reply = engine.complete(
-            [Message("system", SYSTEM), Message("user", prompt_for(scenario))], max_tokens=400
+            [Message("system", SYSTEM), Message("user", prompt_for(scenario))],
+            max_tokens=reply_tokens,
         )
     except ContextTooLarge:
         return [], "failed"
+    except OSError:
+        return [], "error"
     parsed = parse_json(reply)
     raw = parsed.value.get("insights") if isinstance(parsed.value, dict) else None
     insights = []
     for item in raw if isinstance(raw, list) else []:
         if isinstance(item, dict) and isinstance(item.get("text"), str):
-            ids = [int(s) for s in item.get("support", []) if str(s).lstrip("-").isdigit()]
+            ids = [int(x) for x in item.get("support", []) if str(x).lstrip("-").isdigit()]
             insights.append({"text": item["text"], "support": ids})
     return insights, parsed.status
 
 
+def judge(scenario: dict, insights: list[dict]) -> dict:
+    """Score one scenario. `survive` are the proposals that pass the code-side checks."""
+    checks = [code_checks(i, scenario) for i in insights]
+    survive = [i for i, (ok, _) in zip(insights, checks, strict=True) if ok]
+    row = {"id": scenario["id"], "kind": scenario["kind"], "lang": scenario.get("lang")}
+    row |= {"size": scenario.get("size"), "proposed": len(insights), "survive": len(survive)}
+    if scenario["kind"] in ("pattern", "single"):
+        wanted = set(scenario["support"])
+        row["detected"] = any(
+            set(i["support"]) & wanted
+            and any(
+                contains_keyword(i["text"], alt) for group in scenario["match"] for alt in group
+            )
+            for i in survive
+        )
+    return row
+
+
+def summarise_s4(rows: list[dict]) -> dict:
+    wanted = [r for r in rows if r["kind"] in ("pattern", "single")]
+    unwanted = [r for r in rows if r["kind"] in ("none", "known")]
+
+    def rate(num: int, den: int) -> float | None:
+        return round(num / den, 3) if den else None
+
+    def detect(kind: str) -> float | None:
+        sub = [r for r in wanted if r["kind"] == kind]
+        return rate(sum(r["detected"] for r in sub), len(sub))
+
+    return {
+        "scenarios": len(rows),
+        "detect_rate": rate(sum(r["detected"] for r in wanted), len(wanted)),
+        "pattern_detect_rate": detect("pattern"),
+        "single_detect_rate": detect("single"),
+        "false_scenario_rate": rate(sum(r["proposed"] > 0 for r in unwanted), len(unwanted)),
+        "false_insights_proposed": sum(r["proposed"] for r in unwanted),
+        "false_insights_surviving": sum(r["survive"] for r in unwanted),
+        "known_repeated": rate(
+            sum(r["proposed"] > 0 for r in rows if r["kind"] == "known"),
+            sum(r["kind"] == "known" for r in rows),
+        ),
+    }
+
+
+def run_s4(engine, scenarios: list[dict], reply_tokens: int = 900) -> dict:
+    rows, statuses = [], {"strict": 0, "recovered": 0, "failed": 0, "error": 0}
+    for scenario in scenarios:
+        insights, status = propose(engine, scenario, reply_tokens)
+        statuses[status] += 1
+        rows.append(judge(scenario, insights))
+    return {"rows": rows, "json": statuses, "summary": summarise_s4(rows)}
+
+
 def main() -> None:
     engine = engine_from_env()
-    rows = []
-    for scenario in SCENARIOS:
-        insights, status = propose(engine, scenario)
-        checks = [code_checks(i, scenario) for i in insights]
-        surviving = [i for i, (ok, _) in zip(insights, checks, strict=True) if ok]
-        row = {"id": scenario["id"], "kind": scenario["kind"], "json": status}
-        row |= {"proposed": insights, "survive_code_checks": surviving}
-        if scenario["kind"] in ("pattern", "single"):
-            wanted = scenario["support"]
-            right = [
-                i
-                for i in surviving
-                if set(i["support"]) & wanted
-                and any(
-                    normalise(alt) in normalise(i["text"])
-                    for group in scenario["match"]
-                    for alt in group
-                )
-            ]
-            row["detected"] = bool(right)
-        row["note"] = scenario.get("note", "")
-        rows.append(row)
-
-    wanted_rows = [r for r in rows if r["kind"] in ("pattern", "single")]
-    unwanted = [r for r in rows if r["kind"] in ("none", "known")]
-    false_proposed = sum(len(r["proposed"]) for r in unwanted)
-    false_surviving = sum(len(r["survive_code_checks"]) for r in unwanted)
-    output = {
-        "model": model_info(),
-        "scenarios": len(rows),
-        "detected": f"{sum(r['detected'] for r in wanted_rows)}/{len(wanted_rows)}",
-        "scenarios_with_a_false_insight": f"{sum(bool(r['proposed']) for r in unwanted)}/{len(unwanted)}",
-        "false_insights_proposed": false_proposed,
-        "false_insights_surviving_code_checks": false_surviving,
-        "json_failures": sum(r["json"] == "failed" for r in rows),
-        "rows": rows,
-    }
+    result = run_s4(engine, SCENARIOS)
+    output = {"model": model_info()} | result["summary"] | {"json": result["json"]}
     name = re.sub(r"[^a-z0-9.]+", "_", output["model"]["model"].lower())
     (Path(__file__).parent / "results" / f"s4_{name}.json").write_text(
-        json.dumps(output, indent=2, ensure_ascii=False)
+        json.dumps(output | {"rows": result["rows"]}, indent=2, ensure_ascii=False)
     )
-    print(json.dumps({k: v for k, v in output.items() if k != "rows"}, indent=2))
-    for r in rows:
-        print(f"{r['id']:>3} {r['kind']:<8} detected={r.get('detected', '-')!s:<5} proposed:")
-        for i in r["proposed"]:
-            print(f"      {i['support']} {i['text']}")
+    print(json.dumps(output, indent=2))
 
 
 if __name__ == "__main__":
