@@ -25,6 +25,35 @@ class Parsed:
     status: str  # "strict", "recovered" (needed fences or prose stripped) or "failed"
 
 
+def _close_open_brackets(text: str) -> str | None:
+    """Append the closing brackets a reply forgot, if that is the only thing wrong with it.
+
+    The model sometimes ends `{"insights": [{...}]` without the last `}`. Scanning outside
+    strings keeps a bracket inside a sentence from fooling it.
+    """
+    stack: list[str] = []
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            expected = stack.pop() if stack else None
+            if expected != ch:
+                return None
+    if in_string or not stack:
+        return None
+    return text + "".join(reversed(stack))
+
+
 def parse_json(text: str) -> Parsed:
     try:
         return Parsed(json.loads(text), "strict")
@@ -36,6 +65,14 @@ def parse_json(text: str) -> Parsed:
             return Parsed(json.loads(text[start : end + 1]), "recovered")
         except ValueError:
             pass
+    if start != -1:
+        body = text[start:].split("```")[0].rstrip()
+        closed = _close_open_brackets(body)
+        if closed is not None:
+            try:
+                return Parsed(json.loads(closed), "recovered")
+            except ValueError:
+                pass
     return Parsed(None, "failed")
 
 

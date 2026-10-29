@@ -17,7 +17,8 @@ Sets (generated ones are deterministic, seeded by id):
 from __future__ import annotations
 
 from spike.corpus import CORPUS
-from spike.gen import build_conversation
+from spike.gen import DEV, Pools, build_conversation, s4_scenarios
+from spike.heldout import HELD
 
 MODES = ("en", "it", "mixed")
 
@@ -54,13 +55,13 @@ def hand_set() -> list[dict]:
     return out
 
 
-def generated_set(name: str) -> list[dict]:
+def generated_set(name: str, pools: Pools | None = None, prefix: str = "") -> list[dict]:
     lines, facts, count, modes = SPECS[name]
     out = []
     for mode in modes:
         for i in range(count):
-            conv_id = f"{name}-{mode}-{i:02d}"
-            out.append(build_conversation(conv_id, name, conv_id, mode, lines, facts))
+            conv_id = f"{prefix}{name}-{mode}-{i:02d}"
+            out.append(build_conversation(conv_id, name, conv_id, mode, lines, facts, pools=pools))
     return out
 
 
@@ -90,3 +91,49 @@ if __name__ == "__main__":
         for k in total:
             total[k] += row[k]
     print(f"{'total':<8} {total}")
+
+
+# ------------------------------------------------------------------ tuning splits
+#
+# `dev` is what prompts are tuned against. `test` is held out: different seeds (prefix
+# "ho-"), different phrasing, small talk and Insight topics (heldout.HELD). Only the
+# baseline and the final prompts are ever scored on it.
+#
+# Window-sized sets: the same prompt behaves differently once a Conversation no longer fits
+# one call. At 8k, 16k, 24k and 32k a 12k, 26k and 50k-token Conversation chunk into
+# different numbers of pieces, so the window actually matters.
+
+# set name: (lines, facts, conversations per language, languages)
+TUNING_SPECS = {
+    "t_short": (10, 4, 4, MODES),
+    "t_medium": (40, 10, 3, MODES),
+    "t_long": (240, 40, 2, MODES),  # ~3k tokens: one call at every window
+    "t_xl": (1200, 60, 1, MODES),  # ~13k tokens: one call at 24k+, two at 8k/16k
+    "t_xxl": (2600, 80, 1, ("mixed",)),  # ~28k tokens: needs chunking below 32k
+    "t_noise": (30, 0, 3, MODES),
+}
+
+
+def tuning_set(split: str, names: list[str] | None = None) -> list[dict]:
+    """The window-sized Conversations for the dev or held-out split."""
+    if split not in ("dev", "test"):
+        raise ValueError(split)
+    pools, prefix = (DEV, "dv-") if split == "dev" else (HELD, "ho-")
+    out: list[dict] = []
+    for name in names or list(TUNING_SPECS):
+        lines, facts, count, modes = TUNING_SPECS[name]
+        for mode in modes:
+            for i in range(count):
+                conv_id = f"{prefix}{name}-{mode}-{i:02d}"
+                conv = build_conversation(conv_id, name, conv_id, mode, lines, facts, pools=pools)
+                out.append(conv)
+    return out
+
+
+def insight_set(split: str) -> list[dict]:
+    """S4 scenarios for the dev or held-out split (held-out uses unseen Insight topics)."""
+    if split == "dev":
+        return s4_scenarios(DEV, "dv4")
+    if split == "test":
+        return s4_scenarios(HELD, "ho4")
+    raise ValueError(split)

@@ -7,3 +7,4 @@ __pycache__/
 spike/fixtures/
 spike/results/*.json
 spike/results/matrix/
+spike/results/tune/

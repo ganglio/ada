@@ -97,6 +97,7 @@ class OllamaEngine:
         *,
         beyond_pi: bool = False,
         think: bool | None = None,
+        options: Mapping[str, float] | None = None,
     ) -> None:
         # Only the context-size experiments may exceed the Pi's 2048 tokens, and they
         # must say so explicitly, so ordinary code can never do it by accident.
@@ -107,6 +108,11 @@ class OllamaEngine:
         self._context_tokens = context_tokens
         self._timeout = timeout
         self._think = think
+        # Sampling overrides (temperature, repeat_penalty, ...). They can never change the
+        # context size or the reply budget, which the guard above depends on.
+        self._options = {
+            k: v for k, v in (options or {}).items() if k not in ("num_ctx", "num_predict")
+        }
         # Server-reported counts and timings of the most recent call, for experiments.
         self.last_stats: dict = {}
 
@@ -117,9 +123,10 @@ class OllamaEngine:
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": False,
             "options": {
+                "temperature": 0,
+                **self._options,
                 "num_ctx": self._context_tokens,
                 "num_predict": max_tokens,
-                "temperature": 0,
             },
         }
         if self._think is not None:

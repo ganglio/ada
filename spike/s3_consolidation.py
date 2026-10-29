@@ -90,7 +90,13 @@ def _new_stats() -> dict:
     }
 
 
-def consolidate(engine, lines, chunk_tokens: int = CHUNK_TOKENS, reply_tokens: int = REPLY_TOKENS):
+def consolidate(
+    engine,
+    lines,
+    chunk_tokens: int = CHUNK_TOKENS,
+    reply_tokens: int = REPLY_TOKENS,
+    system: str = SYSTEM,
+):
     memories: list[dict] = []
     stats = _new_stats()
     summary = ""
@@ -102,7 +108,7 @@ def consolidate(engine, lines, chunk_tokens: int = CHUNK_TOKENS, reply_tokens: i
         start = time.perf_counter()
         try:
             reply = engine.complete(
-                [Message("system", SYSTEM), Message("user", user)], max_tokens=reply_tokens
+                [Message("system", system), Message("user", user)], max_tokens=reply_tokens
             )
         except ContextTooLarge:
             stats["failed"] += 1
@@ -252,6 +258,7 @@ def run_s3(
     reply_tokens: int,
     deadline: float | None = None,
     progress=None,
+    system: str = SYSTEM,
 ) -> dict:
     """Consolidate every Conversation in `corpus` and score it.
 
@@ -266,7 +273,7 @@ def run_s3(
             continue
         if progress:
             progress(conv)
-        memories, stats = consolidate(engine, conv["lines"], chunk_tokens, reply_tokens)
+        memories, stats = consolidate(engine, conv["lines"], chunk_tokens, reply_tokens, system)
         for key, value in stats.items():
             calls[key] += value
         row = score(conv, memories) | {"id": conv["id"], "lang": conv["lang"], "set": conv["set"]}

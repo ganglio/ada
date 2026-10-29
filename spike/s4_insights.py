@@ -155,10 +155,12 @@ def code_checks(insight: dict, scenario: dict) -> tuple[bool, str]:
     return False, "not supported across conversations"
 
 
-def propose(engine, scenario: dict, reply_tokens: int = 900) -> tuple[list[dict], str]:
+def propose(
+    engine, scenario: dict, reply_tokens: int = 900, system: str = SYSTEM
+) -> tuple[list[dict], str]:
     try:
         reply = engine.complete(
-            [Message("system", SYSTEM), Message("user", prompt_for(scenario))],
+            [Message("system", system), Message("user", prompt_for(scenario))],
             max_tokens=reply_tokens,
         )
     except ContextTooLarge:
@@ -219,10 +221,10 @@ def summarise_s4(rows: list[dict]) -> dict:
     }
 
 
-def run_s4(engine, scenarios: list[dict], reply_tokens: int = 900) -> dict:
+def run_s4(engine, scenarios: list[dict], reply_tokens: int = 900, system: str = SYSTEM) -> dict:
     rows, statuses = [], {"strict": 0, "recovered": 0, "failed": 0, "error": 0}
     for scenario in scenarios:
-        insights, status = propose(engine, scenario, reply_tokens)
+        insights, status = propose(engine, scenario, reply_tokens, system)
         statuses[status] += 1
         rows.append(judge(scenario, insights))
     return {"rows": rows, "json": statuses, "summary": summarise_s4(rows)}

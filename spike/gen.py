@@ -34,6 +34,17 @@ def item(en: str, it: str, *alts: str) -> Item:
     return Item(en, it, alts)
 
 
+@dataclass(frozen=True)
+class Pools:
+    """The text a split is built from. Dev and held-out splits use different pools, so a
+    prompt tuned on one is tested on phrasing, small talk and Insight topics it never saw."""
+
+    templates: dict
+    noise: dict
+    acks: dict
+    patterns: list
+
+
 DAYS = [
     item("Monday", "lunedì", "monday", "lunedi"),
     item("Tuesday", "martedì", "tuesday", "martedi"),
@@ -451,6 +462,7 @@ def render(
     day: Item | None = None,
     hour: int = 10,
     purpose: Item | None = None,
+    pools: Pools | None = None,
 ) -> Fact:
     """Render one fact. `spec` is the identifying entity: an Item, a name, or a tuple."""
     day = day or DAYS[0]
@@ -494,7 +506,7 @@ def render(
         match = disc
     else:
         raise ValueError(kind)
-    options = TEMPLATES[kind][lang]
+    options = (pools or DEV).templates[kind][lang]
     text = _cap(options[variant % len(options)].format(**keys))
     return Fact(kind, text, source, match, disc)
 
@@ -587,7 +599,9 @@ def build_conversation(
     n_lines: int,
     n_facts: int,
     fixed: dict[str, int] | None = None,
+    pools: Pools | None = None,
 ) -> dict:
+    pools = pools or DEV
     rng = random.Random(seed)
     kinds = plan_kinds(rng, n_facts, fixed)
     bags = _Bags(rng)
@@ -607,6 +621,7 @@ def build_conversation(
             day=rng.choice(DAYS),
             hour=rng.randint(9, 18),
             purpose=rng.choice(VISIT_PURPOSES),
+            pools=pools,
         )
         seq[pos] = (source, fact.text)
         expected.append(
@@ -620,9 +635,14 @@ def build_conversation(
         )
         nxt = pos + 1
         if nxt < n_lines and seq[nxt] is None and rng.random() < 0.6:
-            seq[nxt] = (_speaker(rng, exclude=source), rng.choice(ACKS[_lang_for(rng, mode)]))
+            seq[nxt] = (
+                _speaker(rng, exclude=source),
+                rng.choice(pools.acks[_lang_for(rng, mode)]),
+            )
     lines = [
-        entry if entry is not None else (_speaker(rng), rng.choice(NOISE[_lang_for(rng, mode)]))
+        entry
+        if entry is not None
+        else (_speaker(rng), rng.choice(pools.noise[_lang_for(rng, mode)]))
         for entry in seq
     ]
     return {
@@ -789,33 +809,39 @@ def _scenario(kind: str, mode: str, size: str, index: int, fields: dict) -> dict
     } | fields
 
 
-def s4_scenarios() -> list[dict]:
+def s4_scenarios(pools: Pools | None = None, prefix: str = "s4") -> list[dict]:
     """Insight scenarios: patterns, single Owner concerns, nothing-to-see, already-known."""
+    pools = pools or DEV
     out: list[dict] = []
     for mode in ("en", "it", "mixed"):
-        for size, n_fill in (("small", 3), ("wide", 22)):
+        for size, n_fill in (("small", 3), ("wide", 22), ("long", 150)):
             small = size == "small"
-            patterns = PATTERNS if small else PATTERNS[:3]
+            patterns = pools.patterns if small else pools.patterns[:3]
             built: list[tuple[str, dict]] = []
             for p in patterns:
-                rng = random.Random(f"s4-pattern-{mode}-{size}-{p['key']}")
+                rng = random.Random(f"{prefix}-pattern-{mode}-{size}-{p['key']}")
                 built.append(
-                    ("pattern", _build_pattern(rng, mode, n_fill, p, rng.choice([2, 3]), False))
+                    (
+                        "pattern",
+                        _build_pattern(rng, mode, n_fill, p, rng.choice([2, 3]), False, pools),
+                    )
                 )
             for i in range(4 if small else 2):
-                rng = random.Random(f"s4-single-{mode}-{size}-{i}")
-                built.append(("single", _build_single(rng, mode, n_fill, i)))
+                rng = random.Random(f"{prefix}-single-{mode}-{size}-{i}")
+                built.append(("single", _build_single(rng, mode, n_fill, i, pools)))
             for i in range(6 if small else 2):
-                rng = random.Random(f"s4-none-{mode}-{size}-{i}")
-                built.append(("none", _build_none(rng, mode, n_fill, i)))
-            for p in PATTERNS[: 3 if small else 0]:
-                rng = random.Random(f"s4-known-{mode}-{size}-{p['key']}")
-                built.append(("known", _build_pattern(rng, mode, n_fill, p, 3, True)))
+                rng = random.Random(f"{prefix}-none-{mode}-{size}-{i}")
+                built.append(("none", _build_none(rng, mode, n_fill, i, pools)))
+            for p in pools.patterns[: 3 if small else 0]:
+                rng = random.Random(f"{prefix}-known-{mode}-{size}-{p['key']}")
+                built.append(("known", _build_pattern(rng, mode, n_fill, p, 3, True, pools)))
             out += [_scenario(k, mode, size, i, f) for i, (k, f) in enumerate(built, 1)]
     return out
 
 
-def _assemble(rng, mode, n_fill, planted: list[tuple[str, str]]) -> tuple[list[tuple], set[int]]:
+def _assemble(
+    rng, mode, n_fill, planted: list[tuple[str, str]], pools: Pools
+) -> tuple[list[tuple], set[int]]:
     """Interleave planted segments (who, text) with filler.
 
     Days advance with position through the week, and the planted slots are redrawn until
@@ -833,31 +859,37 @@ def _assemble(rng, mode, n_fill, planted: list[tuple[str, str]]) -> tuple[list[t
             who, text = next(planted_iter)
             support.add(i + 1)
         else:
-            who, text = _speaker(rng), rng.choice(NOISE[_lang_for(rng, mode)])
+            who, text = _speaker(rng), rng.choice(pools.noise[_lang_for(rng, mode)])
         segments.append((i + 1, days[i], who, text))
     return segments, support
 
 
-def _build_pattern(rng, mode, n_fill, p, n_mentions: int, known: bool) -> dict:
+def _build_pattern(rng, mode, n_fill, p, n_mentions: int, known: bool, pools: Pools) -> dict:
     speakers = [OWNER] * n_mentions if p["owner"] else [_speaker(rng) for _ in range(n_mentions)]
     texts = [_segment_text(rng, mode, p["en"], p["it"]) for _ in range(n_mentions)]
-    segments, support = _assemble(rng, mode, n_fill, list(zip(speakers, texts, strict=True)))
+    segments, support = _assemble(rng, mode, n_fill, list(zip(speakers, texts, strict=True)), pools)
     out = {"segments": segments, "support": support, "match": [list(p["alts"])], "topic": p["key"]}
     if known:
         out["known"] = [p["known_it"] if mode == "it" else p["known_en"]]
     return out
 
 
-def _build_single(rng, mode, n_fill, i: int) -> dict:
+def _build_single(rng, mode, n_fill, i: int, pools: Pools) -> dict:
     if i % 2 == 0:
         spec = rng.choice(WORRIES)
-        fact = render("worry", spec, _lang_for(rng, mode), rng.randrange(2), OWNER)
+        fact = render("worry", spec, _lang_for(rng, mode), rng.randrange(2), OWNER, pools=pools)
     else:
         spec = rng.choice(APPOINTMENTS)
         fact = render(
-            "appointment", spec, _lang_for(rng, mode), rng.randrange(3), OWNER, day=rng.choice(DAYS)
+            "appointment",
+            spec,
+            _lang_for(rng, mode),
+            rng.randrange(3),
+            OWNER,
+            day=rng.choice(DAYS),
+            pools=pools,
         )
-    segments, support = _assemble(rng, mode, n_fill, [(OWNER, fact.text)])
+    segments, support = _assemble(rng, mode, n_fill, [(OWNER, fact.text)], pools)
     return {
         "segments": segments,
         "support": support,
@@ -866,7 +898,7 @@ def _build_single(rng, mode, n_fill, i: int) -> dict:
     }
 
 
-def _build_none(rng, mode, n_fill, i: int) -> dict:
+def _build_none(rng, mode, n_fill, i: int, pools: Pools) -> dict:
     flavour = i % 3
     if flavour == 0:
         planted = []
@@ -879,16 +911,17 @@ def _build_none(rng, mode, n_fill, i: int) -> dict:
             rng.randrange(3),
             "Marco",
             day=rng.choice(DAYS),
+            pools=pools,
         )
         planted = [("Marco", fact.text)]
     else:
-        first, second = rng.sample(PATTERNS, 2)
+        first, second = rng.sample(pools.patterns, 2)
         planted = [
             (_speaker(rng), _segment_text(rng, mode, first["en"], first["it"])),
             (_speaker(rng), _segment_text(rng, mode, second["en"], second["it"])),
         ]
     if planted:
-        segments, _ = _assemble(rng, mode, max(n_fill, 2), planted)
+        segments, _ = _assemble(rng, mode, max(n_fill, 2), planted, pools)
     else:
         total = n_fill + 2
         segments = [
@@ -896,8 +929,11 @@ def _build_none(rng, mode, n_fill, i: int) -> dict:
                 k + 1,
                 _WEEK[min(6, k * 7 // total)],
                 _speaker(rng),
-                rng.choice(NOISE[_lang_for(rng, mode)]),
+                rng.choice(pools.noise[_lang_for(rng, mode)]),
             )
             for k in range(total)
         ]
     return {"segments": segments, "support": set(), "match": [], "topic": f"none{flavour}"}
+
+
+DEV = Pools(TEMPLATES, NOISE, ACKS, PATTERNS)
